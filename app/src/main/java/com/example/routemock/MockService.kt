@@ -23,7 +23,7 @@ import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
-import kotlin.math.min
+import java.util.Random
 
 /** Двигает телефон по маршруту, подменяя GPS и сетевой провайдер. */
 class MockService : Service() {
@@ -31,6 +31,7 @@ class MockService : Service() {
     private var job: Job? = null
     private val lm by lazy { getSystemService(LOCATION_SERVICE) as LocationManager }
     private val providers = listOf(LocationManager.GPS_PROVIDER, LocationManager.NETWORK_PROVIDER)
+    private val rnd = Random()
 
     override fun onCreate() {
         super.onCreate()
@@ -65,40 +66,57 @@ class MockService : Service() {
     private suspend fun play(route: Route) {
         try {
             providers.forEach { setupProvider(it) }
-            var traveled = SimulationHub.state.value.traveledM.takeIf { it < route.totalM } ?: 0.0
+            val startM = SimulationHub.state.value.traveledM.takeIf { it < route.totalM } ?: 0.0
+            val motion = MotionModel(route, startM)
             var last = SystemClock.elapsedRealtime()
             var noteAt = 0L
             // Цикл не завершается сам: на финише позиция фиксируется, пока не нажмут «Остановить».
             while (true) {
-                val kmh = SimulationHub.state.value.speedKmh
-                val arrived = traveled >= route.totalM
-                val (pos, course) = route.at(traveled)
-                providers.forEach { push(it, pos, course, if (arrived) 0.0 else kmh / 3.6) }
-                SimulationHub.state.update { it.copy(running = true, error = null, traveledM = traveled, pos = pos) }
+                val arrived = motion.arrived
+                val (pos, course) = route.at(motion.distance)
+                providers.forEach { push(it, pos, course, motion.speed) }
+                val kmh = (motion.speed * 3.6).toFloat()
+                SimulationHub.state.update {
+                    it.copy(
+                        running = true,
+                        error = null,
+                        needsMockApp = false,
+                        traveledM = motion.distance,
+                        pos = pos,
+                        currentKmh = kmh,
+                    )
+                }
 
                 val now = SystemClock.elapsedRealtime()
                 if (now - noteAt > 2000) {
                     noteAt = now
                     refreshNotification(
                         if (arrived) "Вы на месте · нажмите «Остановить»"
-                        else "Осталось ${fmtDist(route.totalM - traveled)} · ${kmh.toInt()} км/ч"
+                        else "Осталось ${fmtDist(route.totalM - motion.distance)} · ${kmh.toInt()} км/ч"
                     )
                 }
 
                 delay(TICK_MS)
                 val after = SystemClock.elapsedRealtime()
-                if (!arrived) traveled = min(route.totalM, traveled + kmh / 3.6 * (after - last) / 1000.0)
+                val dt = ((after - last) / 1000.0).coerceIn(0.05, 5.0)
                 last = after
+                if (!arrived) {
+                    val st = SimulationHub.state.value
+                    motion.step(dt, st.speedKmh, st.realistic)
+                }
             }
         } catch (e: SecurityException) {
             SimulationHub.state.update {
-                it.copy(error = "Выберите RouteMock в настройках разработчика: «Приложение для имитации местоположения»")
+                it.copy(
+                    error = "Выберите RouteMock в настройках разработчика: «Приложение для имитации местоположения»",
+                    needsMockApp = true,
+                )
             }
         } catch (e: IllegalArgumentException) {
             SimulationHub.state.update { it.copy(error = "Тестовый провайдер недоступен: ${e.message}") }
         } finally {
             providers.forEach { runCatching { lm.setTestProviderEnabled(it, false); lm.removeTestProvider(it) } }
-            SimulationHub.state.update { it.copy(running = false) }
+            SimulationHub.state.update { it.copy(running = false, currentKmh = 0f) }
             finishService()
         }
     }
@@ -131,9 +149,12 @@ class MockService : Service() {
             latitude = pos.lat
             longitude = pos.lon
             altitude = 0.0
-            accuracy = 3f
+            accuracy = 3f + rnd.nextFloat() * 2f
             bearing = course
             speed = speedMs.toFloat()
+            speedAccuracyMetersPerSecond = 0.5f
+            bearingAccuracyDegrees = 5f
+            verticalAccuracyMeters = 5f
             time = System.currentTimeMillis()
             elapsedRealtimeNanos = SystemClock.elapsedRealtimeNanos()
         }
@@ -177,6 +198,6 @@ class MockService : Service() {
         const val ACTION_STOP = "com.example.routemock.STOP"
         private const val CHANNEL = "simulation"
         private const val NOTIF_ID = 1
-        private const val TICK_MS = 500L
+        private const val TICK_MS = 1000L
     }
 }
