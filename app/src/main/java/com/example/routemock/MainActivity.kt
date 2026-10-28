@@ -14,6 +14,7 @@ import androidx.compose.material3.dynamicDarkColorScheme
 import androidx.compose.material3.dynamicLightColorScheme
 import androidx.compose.material3.lightColorScheme
 import androidx.compose.runtime.Composable
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.AndroidViewModel
@@ -31,6 +32,24 @@ class MainActivity : ComponentActivity() {
     }
 }
 
+private val FallbackLight = lightColorScheme(
+    primary = Color(0xFF3E5BA9),
+    onPrimary = Color.White,
+    primaryContainer = Color(0xFFDBE1FF),
+    onPrimaryContainer = Color(0xFF001551),
+    secondaryContainer = Color(0xFFDCE2F9),
+    tertiary = Color(0xFF00696B),
+)
+
+private val FallbackDark = darkColorScheme(
+    primary = Color(0xFFB5C4FF),
+    onPrimary = Color(0xFF042978),
+    primaryContainer = Color(0xFF24408F),
+    onPrimaryContainer = Color(0xFFDBE1FF),
+    secondaryContainer = Color(0xFF404659),
+    tertiary = Color(0xFF4CDADC),
+)
+
 /** Material 3: на Android 12+ цвета берутся из обоев (Material You). */
 @Composable
 fun RouteMockTheme(content: @Composable () -> Unit) {
@@ -39,8 +58,8 @@ fun RouteMockTheme(content: @Composable () -> Unit) {
     val scheme = when {
         Build.VERSION.SDK_INT >= Build.VERSION_CODES.S ->
             if (dark) dynamicDarkColorScheme(context) else dynamicLightColorScheme(context)
-        dark -> darkColorScheme()
-        else -> lightColorScheme()
+        dark -> FallbackDark
+        else -> FallbackLight
     }
     MaterialTheme(colorScheme = scheme, content = content)
 }
@@ -49,39 +68,47 @@ class MainViewModel(private val app: Application) : AndroidViewModel(app) {
     enum class Target { START, END }
 
     data class UiState(
-        val start: LatLon? = null,
-        val end: LatLon? = null,
-        val target: Target = Target.START,
+        val startText: String = "",
+        val endText: String = "",
         val profile: RouteProfile = RouteProfile.CAR,
         val building: Boolean = false,
         val routeError: String? = null,
-    )
+    ) {
+        val start: LatLon? get() = parseCoords(startText)
+        val end: LatLon? get() = parseCoords(endText)
+    }
 
     private val _ui = MutableStateFlow(UiState())
     val ui = _ui.asStateFlow()
     val sim = SimulationHub.state
 
-    /** Тап по карте ставит точку текущей цели; после старта сам переключается на финиш. */
-    fun tap(p: LatLon) {
-        val t = _ui.value.target
-        setPoint(t, p)
-        if (t == Target.START && _ui.value.end == null) setTarget(Target.END)
+    fun setText(t: Target, text: String) {
+        if (sim.value.running) return
+        _ui.update {
+            if (t == Target.START) it.copy(startText = text, routeError = null)
+            else it.copy(endText = text, routeError = null)
+        }
+        if (sim.value.route != null) resetRoute()
     }
 
-    fun setPoint(t: Target, p: LatLon) {
+    fun swap() {
         if (sim.value.running) return
-        _ui.update { if (t == Target.START) it.copy(start = p) else it.copy(end = p) }
+        _ui.update { it.copy(startText = it.endText, endText = it.startText, routeError = null) }
         resetRoute()
     }
 
-    fun setTarget(t: Target) = _ui.update { it.copy(target = t) }
-
     fun setProfile(p: RouteProfile) {
-        _ui.update { it.copy(profile = p) }
+        if (sim.value.running) return
+        _ui.update { it.copy(profile = p, routeError = null) }
         resetRoute()
     }
 
     fun setSpeed(kmh: Float) = SimulationHub.state.update { it.copy(speedKmh = kmh) }
+
+    fun setRealistic(on: Boolean) = SimulationHub.state.update { it.copy(realistic = on) }
+
+    fun showError(message: String) =
+        SimulationHub.state.update { it.copy(error = message, needsMockApp = false) }
 
     fun clear() {
         if (sim.value.running) return
@@ -103,13 +130,14 @@ class MainViewModel(private val app: Application) : AndroidViewModel(app) {
                     it.copy(
                         route = route,
                         traveledM = 0.0,
-                        pos = a,
+                        pos = route.points.first(),
                         error = null,
-                        speedKmh = avgKmh?.coerceIn(1f, 150f) ?: it.speedKmh,
+                        needsMockApp = false,
+                        speedKmh = avgKmh?.coerceAtLeast(1f) ?: it.speedKmh,
                     )
                 }
             } catch (e: Exception) {
-                _ui.update { it.copy(routeError = "Не удалось построить маршрут. ${e.message.orEmpty()}") }
+                _ui.update { it.copy(routeError = "Не удалось построить маршрут: ${e.message.orEmpty()}") }
             } finally {
                 _ui.update { it.copy(building = false) }
             }
@@ -125,6 +153,8 @@ class MainViewModel(private val app: Application) : AndroidViewModel(app) {
     }
 
     private fun resetRoute() {
-        SimulationHub.state.update { it.copy(route = null, traveledM = 0.0, pos = null, error = null) }
+        SimulationHub.state.update {
+            it.copy(route = null, traveledM = 0.0, pos = null, error = null, needsMockApp = false, currentKmh = 0f)
+        }
     }
 }
